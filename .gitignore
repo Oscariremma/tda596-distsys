@@ -30,4 +30,4 @@ go.work.sum
 .vscode/
 
 # Direnv
-.envrc/
+.direnv/
