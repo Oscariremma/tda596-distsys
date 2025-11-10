@@ -9,16 +9,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
-)
 
-type HttpResponse []byte
-
-var (
-	OK                  HttpResponse = []byte("HTTP/1.1 200 OK\r\n\r\n")
-	NotFound            HttpResponse = []byte("HTTP/1.1 404 Not Found\r\n\r\n")
-	BadRequest          HttpResponse = []byte("HTTP/1.1 400 Bad Request\r\n\r\n")
-	NotImplemented      HttpResponse = []byte("HTTP/1.1 501 Not Implemented\r\n\r\n")
-	InternalServerError HttpResponse = []byte("HTTP/1.1 500 Internal Server Error\r\n\r\n")
+	"github.com/Oscariremma/tda596-distsys/lab1/httpCommon"
 )
 
 var allowedExts = []string{"txt", "html", "png", "jpg", "jpeg", "css", "gif"}
@@ -37,45 +29,13 @@ var mimeTypes = map[string]string{
 
 func main() {
 	initDataDir()
-	port := getPort()
-	run(port)
+	port := httpCommon.GetPort("8080")
+	httpCommon.RunServerWithLimit(port, 10, handleConnection)
 }
 
 func initDataDir() {
 	if err := os.Mkdir(baseDir, os.ModePerm); err != nil && !strings.Contains(err.Error(), "file exists") {
 		log.Fatalf("Error creating directory: %s", err)
-	}
-}
-
-func getPort() string {
-	if len(os.Args) > 1 {
-		return os.Args[1]
-	}
-	return "8080"
-}
-
-func run(port string) {
-	ln, err := net.Listen("tcp", ":"+port)
-	if err != nil {
-		log.Fatalf("Error starting server: %v", err)
-	}
-	defer ln.Close()
-
-	fmt.Println("Server is listening on port", port)
-
-	connCountSem := make(chan struct{}, 10)
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			fmt.Println("Error accepting connection:", err)
-			continue
-		}
-
-		connCountSem <- struct{}{}
-		go func() {
-			defer func() { <-connCountSem }()
-			handleConnection(conn)
-		}()
 	}
 }
 
@@ -85,7 +45,7 @@ func handleConnection(conn net.Conn) {
 	req, err := http.ReadRequest(bufio.NewReader(conn))
 	if err != nil {
 		fmt.Println("Error reading HTTP request:", err)
-		conn.Write(BadRequest)
+		conn.Write(httpCommon.ResponseBadRequest)
 		return
 	}
 
@@ -96,6 +56,7 @@ func handleConnection(conn net.Conn) {
 		handlePostRequest(req, conn)
 	default:
 		fmt.Println("Unsupported HTTP method:", req.Method)
+		conn.Write(httpCommon.ResponseNotImplemented)
 	}
 }
 
@@ -105,20 +66,20 @@ func handleGetRequest(req *http.Request, responseWriter io.Writer) {
 	filePath, fileExt, err := validateAndBuildPath(req.URL.Path)
 	if err != nil {
 		fmt.Println(err)
-		responseWriter.Write(BadRequest)
+		responseWriter.Write(httpCommon.ResponseBadRequest)
 		return
 	}
 
 	file, err := os.Open(filePath)
 	if err != nil {
 		fmt.Println("File not found:", err)
-		responseWriter.Write(NotFound)
+		responseWriter.Write(httpCommon.ResponseNotFound)
 		return
 	}
 	defer file.Close()
 
 	mimeType := mimeTypes[fileExt]
-	header := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: %s\r\n\r\n", mimeType)
+	header := fmt.Sprintf("HTTP/1.1 200 ResponseOK\r\nContent-Type: %s\r\n\r\n", mimeType)
 	responseWriter.Write([]byte(header))
 
 	if _, err := io.Copy(responseWriter, file); err != nil {
@@ -132,25 +93,25 @@ func handlePostRequest(req *http.Request, responseWriter io.Writer) {
 	filePath, _, err := validateAndBuildPath(req.URL.Path)
 	if err != nil {
 		fmt.Println(err)
-		responseWriter.Write(BadRequest)
+		responseWriter.Write(httpCommon.ResponseBadRequest)
 		return
 	}
 
 	file, err := os.Create(filePath)
 	if err != nil {
 		fmt.Println("Error creating file:", err)
-		responseWriter.Write(InternalServerError)
+		responseWriter.Write(httpCommon.ResponseInternalServerError)
 		return
 	}
 	defer file.Close()
 
 	if _, err := io.Copy(file, req.Body); err != nil {
 		fmt.Println("Error writing to file:", err)
-		responseWriter.Write(InternalServerError)
+		responseWriter.Write(httpCommon.ResponseInternalServerError)
 		return
 	}
 
-	responseWriter.Write(OK)
+	responseWriter.Write(httpCommon.ResponseOK)
 }
 
 func validateAndBuildPath(urlPath string) (string, string, error) {
