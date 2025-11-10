@@ -36,33 +36,34 @@ var mimeTypes = map[string]string{
 }
 
 func main() {
-	args := os.Args[1:]
+	initDataDir()
+	port := getPort()
+	run(port)
+}
 
-	err := os.Mkdir(baseDir, os.ModePerm)
-	if err != nil {
-		// to avoid unused variable warning
-		if !strings.Contains(err.Error(), "file exists") {
-			log.Fatalf("Error creating directory: %s", err)
-		}
+func initDataDir() {
+	if err := os.Mkdir(baseDir, os.ModePerm); err != nil && !strings.Contains(err.Error(), "file exists") {
+		log.Fatalf("Error creating directory: %s", err)
 	}
+}
 
-	port := "8080" // default port
-	if len(args) > 0 {
-		port = args[0]
+func getPort() string {
+	if len(os.Args) > 1 {
+		return os.Args[1]
 	}
+	return "8080"
+}
 
+func run(port string) {
 	ln, err := net.Listen("tcp", ":"+port)
 	if err != nil {
-		fmt.Println("Error starting server:", err)
-		return
+		log.Fatalf("Error starting server: %v", err)
 	}
-
 	defer ln.Close()
 
 	fmt.Println("Server is listening on port", port)
 
-	connCountSem := make(chan struct{}, 10) // limit to 10 concurrent connections
-
+	connCountSem := make(chan struct{}, 10)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -70,12 +71,10 @@ func main() {
 			continue
 		}
 
-		connCountSem <- struct{}{} // acquire semaphore
-
+		connCountSem <- struct{}{}
 		go func() {
-			defer func() { <-connCountSem }() // release semaphore
+			defer func() { <-connCountSem }()
 			handleConnection(conn)
-			// no artificial sleep; handlers release immediately when done
 		}()
 	}
 }
@@ -83,108 +82,99 @@ func main() {
 func handleConnection(conn net.Conn) {
 	defer conn.Close()
 
-	reader := bufio.NewReader(conn)
-	httpReq, err := http.ReadRequest(reader)
+	req, err := http.ReadRequest(bufio.NewReader(conn))
 	if err != nil {
 		fmt.Println("Error reading HTTP request:", err)
 		conn.Write(BadRequest)
 		return
 	}
 
-	switch httpReq.Method {
+	switch req.Method {
 	case http.MethodGet:
-		handleGetRequest(httpReq, conn)
+		handleGetRequest(req, conn)
 	case http.MethodPost:
-		handlePostRequest(httpReq, conn)
+		handlePostRequest(req, conn)
 	default:
-		fmt.Println("Unsupported HTTP method:", httpReq.Method)
-		conn.Write(NotImplemented)
+		fmt.Println("Unsupported HTTP method:", req.Method)
 	}
 }
 
-func handleGetRequest(req *http.Request, respWriter io.Writer) {
-
+func handleGetRequest(req *http.Request, responseWriter io.Writer) {
 	fmt.Println("Handling GET request for URL:", req.URL)
 
-	isAllowed, fileExt := validateFileExtension(req.URL.Path)
-
-	if !isAllowed {
-		fmt.Println("File extension not allowed:", fileExt)
-		respWriter.Write(BadRequest)
+	filePath, fileExt, err := validateAndBuildPath(req.URL.Path)
+	if err != nil {
+		fmt.Println(err)
+		responseWriter.Write(BadRequest)
 		return
 	}
 
-	filePath := baseDir + strings.TrimPrefix(req.URL.Path, "/")
 	file, err := os.Open(filePath)
 	if err != nil {
 		fmt.Println("File not found:", err)
-		respWriter.Write(NotFound)
+		responseWriter.Write(NotFound)
 		return
 	}
 	defer file.Close()
 
-	mimeType, exists := mimeTypes[fileExt]
-	if !exists {
-		fmt.Println("MIME type not found for extension:", fileExt)
-		respWriter.Write(InternalServerError)
-		return
-	}
-
+	mimeType := mimeTypes[fileExt]
 	header := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: %s\r\n\r\n", mimeType)
-	respWriter.Write([]byte(header))
+	responseWriter.Write([]byte(header))
 
-	_, err = io.Copy(respWriter, file)
-	if err != nil {
+	if _, err := io.Copy(responseWriter, file); err != nil {
 		fmt.Println("Error sending file:", err)
-		respWriter.Write(InternalServerError)
-		return
 	}
 }
 
-func handlePostRequest(req *http.Request, respWriter io.Writer) {
+func handlePostRequest(req *http.Request, responseWriter io.Writer) {
 	fmt.Println("Handling POST request for URL:", req.URL)
 
-	isAllowed, fileExt := validateFileExtension(req.URL.Path)
-
-	if !isAllowed {
-		fmt.Println("File extension not allowed:", fileExt)
-		respWriter.Write(BadRequest)
+	filePath, _, err := validateAndBuildPath(req.URL.Path)
+	if err != nil {
+		fmt.Println(err)
+		responseWriter.Write(BadRequest)
 		return
 	}
-
-	filePath := baseDir + strings.TrimPrefix(req.URL.Path, "/")
 
 	file, err := os.Create(filePath)
 	if err != nil {
 		fmt.Println("Error creating file:", err)
-		respWriter.Write(InternalServerError)
+		responseWriter.Write(InternalServerError)
 		return
 	}
 	defer file.Close()
 
-	_, err = io.Copy(file, req.Body)
-	if err != nil {
+	if _, err := io.Copy(file, req.Body); err != nil {
 		fmt.Println("Error writing to file:", err)
-		respWriter.Write(InternalServerError)
+		responseWriter.Write(InternalServerError)
 		return
 	}
 
-	respWriter.Write(OK)
+	responseWriter.Write(OK)
 }
 
-func validateFileExtension(filePath string) (bool, string) {
-	pathParts := strings.Split(filePath, ".")
-	if len(pathParts) < 2 {
-		return false, ""
+func validateAndBuildPath(urlPath string) (string, string, error) {
+	fileExt := getFileExtension(urlPath)
+	if !isExtensionAllowed(fileExt) {
+		return "", "", fmt.Errorf("file extension not allowed: %s", fileExt)
 	}
+	filePath := baseDir + strings.TrimPrefix(urlPath, "/")
+	return filePath, fileExt, nil
+}
 
-	fileExt := pathParts[len(pathParts)-1]
-	fileExt = strings.ToLower(fileExt)
+func getFileExtension(path string) string {
+	parts := strings.Split(path, ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	return strings.ToLower(parts[len(parts)-1])
+}
 
-	for _, ext := range allowedExts {
-		if fileExt == ext {
-			return true, fileExt
+func isExtensionAllowed(ext string) bool {
+	for _, allowed := range allowedExts {
+		if ext == allowed {
+			return true
 		}
 	}
-	return false, fileExt
+	return false
 }
