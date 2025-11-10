@@ -31,3 +31,5 @@ go.work.sum
 
 # Direnv
 .direnv/
+/lab1/http_server/http_server
+/lab1/proxy/proxy
