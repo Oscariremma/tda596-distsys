@@ -6,23 +6,90 @@ package mr
 // remember to capitalize all names.
 //
 
-import "os"
+import (
+	"os"
+	"time"
+)
 import "strconv"
 
-//
-// example to show how to declare the arguments
-// and reply for an RPC.
-//
+type TaskType int
 
-type ExampleArgs struct {
-	X int
+const (
+	ExitTask TaskType = iota
+	TaskWait
+	TaskMap
+	TaskReduce
+)
+
+type MapTask struct {
+	TaskId   uint32
+	FileName string
+	Content  string
 }
 
-type ExampleReply struct {
-	Y int
+type ReduceTask struct {
+	ReducerId   uint32
+	DataSources []string
 }
 
-// Add your RPC definitions here.
+type WaitTask struct {
+	SleepTime time.Duration
+}
+
+type GetWorkTaskArgs struct {
+	WorkerId uint32
+}
+
+type GetWorkTaskReply struct {
+	Type       TaskType
+	MapTask    *MapTask
+	ReduceTask *ReduceTask
+	WaitTask   *WaitTask
+}
+
+type ReportReduceTaskArgs struct {
+	WorkerId  uint32
+	Id        uint32
+	Success   bool
+	KeyValues []KeyValue
+}
+
+type ReportReduceTaskReply struct {
+}
+
+type ReportMapTaskArgs struct {
+	WorkerId uint32
+	TaskId   uint32
+}
+
+type RegisterWorkerArgs struct {
+	LocalRpcPort string
+}
+
+type ReportMapTaskReply struct {
+}
+
+type RegisterWorkerReply struct {
+	WorkerId     uint32
+	ReducerCount uint32
+}
+
+// Worker-worker RCP definitions.
+
+type FetchDataForReducerArgs struct {
+	ReducerId uint32
+}
+
+type FetchDataForReducerReply struct {
+	KeyValues []KeyValue
+}
+
+type PingWorkerArgs struct {
+}
+
+type PingWorkerReply struct {
+	WorkerId uint32
+}
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.
