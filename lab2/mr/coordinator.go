@@ -16,6 +16,7 @@ const (
 	taskTimeout            = 5 * time.Second
 	defaultCoordinatorPort = "1234"
 	workerWaitTime         = 500 * time.Millisecond // Time workers wait before retrying when no tasks available
+	workerPingTimeout      = 1 * time.Second        // Timeout for pinging workers
 )
 
 // getCoordinatorPort returns the coordinator port from env or default.
@@ -212,7 +213,7 @@ func (c *ConnCoordinator) assignReduceTask(taskId, workerId uint32, reply *GetWo
 	task.workerId = workerId
 	task.assigned = true
 
-	dataSources := c.coordinator.buildDataSources(taskId, workerId)
+	dataSources := c.coordinator.buildDataSources(workerId)
 
 	if len(dataSources) == 0 && len(c.coordinator.newWorkers) != (len(c.coordinator.workers)-1) {
 		c.coordinator.mu.Unlock()
@@ -233,7 +234,7 @@ func (c *ConnCoordinator) assignReduceTask(taskId, workerId uint32, reply *GetWo
 
 // buildDataSources creates the list of data sources for a reduce task.
 // Caller must hold mu.
-func (c *Coordinator) buildDataSources(reduceId, assignedWorkerId uint32) []DataSource {
+func (c *Coordinator) buildDataSources(assignedWorkerId uint32) []DataSource {
 	var dataSources []DataSource
 
 	for workerId, worker := range c.workers {
@@ -253,7 +254,7 @@ func (c *Coordinator) buildDataSources(reduceId, assignedWorkerId uint32) []Data
 }
 
 // ReportMapTask handles a worker's report of a completed map task.
-func (c *ConnCoordinator) ReportMapTask(args *ReportMapTaskArgs, reply *ReportMapTaskReply) error {
+func (c *ConnCoordinator) ReportMapTask(args *ReportMapTaskArgs, _ *ReportMapTaskReply) error {
 	c.coordinator.mu.Lock()
 	defer c.coordinator.mu.Unlock()
 
@@ -277,7 +278,7 @@ func (c *ConnCoordinator) ReportMapTask(args *ReportMapTaskArgs, reply *ReportMa
 }
 
 // ReportReduceTask handles a worker's report of a completed reduce task.
-func (c *ConnCoordinator) ReportReduceTask(args *ReportReduceTaskArgs, reply *ReportReduceTaskReply) error {
+func (c *ConnCoordinator) ReportReduceTask(args *ReportReduceTaskArgs, _ *ReportReduceTaskReply) error {
 	c.coordinator.mu.Lock()
 
 	task := c.coordinator.reduceTasks[args.Id]
@@ -293,8 +294,29 @@ func (c *ConnCoordinator) ReportReduceTask(args *ReportReduceTaskArgs, reply *Re
 		task.assigned = false
 		task.completed = false
 		c.coordinator.logProgress(fmt.Sprintf("Reduce task %d failed, re-queuing", args.Id))
-		c.coordinator.availableReduceTasks <- args.Id
-		c.coordinator.mu.Unlock()
+
+		// Handle failed workers immediately
+		if len(args.FailedWorkerIds) > 0 {
+			c.coordinator.mu.Unlock()
+			// Mark failed workers as dead
+			for _, failedWorkerId := range args.FailedWorkerIds {
+				log.Printf("Worker %d reported that worker %d is unresponsive, marking as dead", args.WorkerId, failedWorkerId)
+				c.coordinator.handleDeadWorker(failedWorkerId)
+			}
+			// The task will be re-queued by handleDeadWorker if it was assigned to a dead worker,
+			// otherwise we need to re-queue it here
+			c.coordinator.mu.Lock()
+			if !c.coordinator.reduceTasks[args.Id].assigned {
+				c.coordinator.mu.Unlock()
+				c.coordinator.availableReduceTasks <- args.Id
+				return nil
+			}
+			c.coordinator.mu.Unlock()
+		} else {
+			// No specific workers reported as failed, just re-queue the task
+			c.coordinator.mu.Unlock()
+			c.coordinator.availableReduceTasks <- args.Id
+		}
 		return nil
 	}
 
@@ -328,7 +350,11 @@ func readInputFile(fileName string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			log.Printf("Warning: failed to close file %s: %v", fileName, err)
+		}
+	}()
 
 	content, err := io.ReadAll(file)
 	if err != nil {
@@ -343,7 +369,11 @@ func writeReduceOutput(keyValues []KeyValue) error {
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
 	}
-	defer outFile.Close()
+	defer func() {
+		if err := outFile.Close(); err != nil {
+			log.Printf("Warning: failed to close output file: %v", err)
+		}
+	}()
 
 	for _, kv := range keyValues {
 		if _, err := fmt.Fprintf(outFile, "%s %s\n", kv.Key, kv.Value); err != nil {
@@ -398,16 +428,19 @@ func (c *Coordinator) startReduceTimeout(taskId uint32, duration time.Duration) 
 		select {
 		case <-time.After(duration):
 			c.mu.Lock()
-			defer c.mu.Unlock()
-
 			task := c.reduceTasks[taskId]
-			if !task.completed {
-				task.workerId = 0
-				task.assigned = false
-				c.availableReduceTasks <- taskId
-				c.logProgress(fmt.Sprintf("Reduce task %d timed out, re-queuing", taskId))
+			if !task.completed && task.assigned {
+				workerId := task.workerId
+				c.mu.Unlock()
+				log.Printf("Reduce task %d timed out, treating worker %d as dead", taskId, workerId)
+				c.handleDeadWorker(workerId)
+			} else {
+				c.mu.Unlock()
 			}
+
+			c.mu.Lock()
 			delete(c.reduceTimeoutCancel, taskId)
+			c.mu.Unlock()
 		case <-cancel:
 			return
 		}
@@ -454,7 +487,13 @@ func (c *Coordinator) server() {
 			}
 
 			rpcServer := rpc.NewServer()
-			rpcServer.Register(wrappedConn)
+			if err := rpcServer.Register(wrappedConn); err != nil {
+				log.Printf("Warning: failed to register RPC handler: %v", err)
+				if closeErr := conn.Close(); closeErr != nil {
+					log.Printf("Warning: failed to close connection: %v", closeErr)
+				}
+				continue
+			}
 			go rpcServer.ServeConn(wrappedConn)
 		}
 	}()
@@ -463,7 +502,6 @@ func (c *Coordinator) server() {
 // Done returns true if all MapReduce jobs have completed.
 func (c *Coordinator) Done() bool {
 	if c.workDone.Load() {
-		time.Sleep(2 * time.Second) // Wait for workers to exit
 		return true
 	}
 	return false
@@ -499,20 +537,41 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	go c.workerHealthCheck()
 
 	// Ensure the socket file exists (for test script compatibility)
-	os.Create(coordinatorSock())
-	os.Remove("mr-out-0")
+	if f, err := os.Create(coordinatorSock()); err != nil {
+		log.Printf("Warning: failed to create socket file: %v", err)
+	} else {
+		if err := f.Close(); err != nil {
+			log.Printf("Warning: failed to close socket file: %v", err)
+		}
+	}
+	if err := os.Remove("mr-out-0"); err != nil && !os.IsNotExist(err) {
+		log.Printf("Warning: failed to remove old output file: %v", err)
+	}
 
 	c.server()
 	return &c
 }
 
 // PingWorker sends a ping to a worker and returns its ID.
+// Uses workerPingTimeout for the connection and RPC call.
 func (w *RemoteWorker) PingWorker() (uint32, error) {
-	client, err := rpc.Dial("tcp", w.rpcEndpoint)
+	conn, err := net.DialTimeout("tcp", w.rpcEndpoint, workerPingTimeout)
 	if err != nil {
 		return 0, err
 	}
-	defer client.Close()
+	defer func() {
+		_ = conn.Close()
+	}()
+
+	client := rpc.NewClient(conn)
+	defer func() {
+		_ = client.Close()
+	}()
+
+	// Set a deadline for the RPC call
+	if err := conn.SetDeadline(time.Now().Add(workerPingTimeout)); err != nil {
+		return 0, fmt.Errorf("failed to set deadline: %w", err)
+	}
 
 	var reply PingWorkerReply
 	if err := client.Call("WorkerRpc.PingWorker", &PingWorkerArgs{}, &reply); err != nil {

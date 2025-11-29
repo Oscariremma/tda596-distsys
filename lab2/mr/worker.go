@@ -52,7 +52,8 @@ type KeyValue struct {
 // ihash returns a hash for the given key, used for partitioning keys to reducers.
 func ihash(key string) int {
 	h := fnv.New32a()
-	h.Write([]byte(key))
+	// hash.Hash.Write never returns an error according to the interface documentation
+	_, _ = h.Write([]byte(key))
 	return int(h.Sum32() & 0x7fffffff)
 }
 
@@ -109,7 +110,10 @@ func Worker(mapf func(string, string) []KeyValue,
 	}
 
 	log.Printf("Worker %d started", instance.WorkerId)
-	instance.ClearOldWorkerFiles()
+	err = instance.ClearOldWorkerFiles()
+	if err != nil {
+		log.Fatalf("Failed to clear old worker files: %v", err)
+	}
 
 	for {
 		var reply GetWorkTaskReply
@@ -177,15 +181,18 @@ func (wi *WorkerInstance) saveMapResult(mapRes []KeyValue) {
 
 // ProcessReduceTask fetches data from other workers and executes a reduce task.
 func (wi *WorkerInstance) ProcessReduceTask(task *ReduceTask) {
-	data := wi.fetchReduceData(task)
-	if data == nil {
-		return // Error already reported
+	data, failedWorkerIds := wi.fetchReduceData(task)
+
+	// Report failed workers to coordinator
+	if len(failedWorkerIds) > 0 {
+		wi.reportFailedReduce(task.ReducerId, failedWorkerIds)
+		return
 	}
 
 	localData, err := readMapResultForReducer(wi.WorkerId, task.ReducerId)
 	if err != nil {
 		log.Printf("Failed to read local map result for reducer %d: %v", task.ReducerId, err)
-		wi.reportFailedReduce(task.ReducerId)
+		wi.reportFailedReduce(task.ReducerId, nil)
 		return
 	}
 
@@ -195,10 +202,11 @@ func (wi *WorkerInstance) ProcessReduceTask(task *ReduceTask) {
 
 	var reportReduceTaskReply ReportReduceTaskReply
 	err = wi.Coordinator.ReportReduceTask(ReportReduceTaskArgs{
-		Id:        task.ReducerId,
-		Success:   true,
-		KeyValues: reducedData,
-		WorkerId:  wi.WorkerId,
+		Id:              task.ReducerId,
+		Success:         true,
+		KeyValues:       reducedData,
+		WorkerId:        wi.WorkerId,
+		FailedWorkerIds: nil,
 	}, &reportReduceTaskReply)
 	if err != nil {
 		log.Fatalf("Failed to report reduce task: %v", err)
@@ -206,15 +214,17 @@ func (wi *WorkerInstance) ProcessReduceTask(task *ReduceTask) {
 }
 
 // fetchReduceData fetches intermediate data from other workers for a reduce task.
-// Returns nil if there was an error (already reported to coordinator).
-func (wi *WorkerInstance) fetchReduceData(task *ReduceTask) []KeyValue {
+// Returns the data and a list of worker IDs that failed to respond.
+func (wi *WorkerInstance) fetchReduceData(task *ReduceTask) ([]KeyValue, []uint32) {
 	data := make([]KeyValue, 0)
+	failedWorkerIds := make([]uint32, 0)
 
 	for _, source := range task.DataSources {
 		otherWorkerRpc, err := ConnectToOtherWorker(source.Endpoint)
 		if err != nil {
-			wi.reportFailedReduce(task.ReducerId)
-			return nil
+			log.Printf("Failed to connect to worker %d at %s: %v", source.WorkerId, source.Endpoint, err)
+			failedWorkerIds = append(failedWorkerIds, source.WorkerId)
+			continue
 		}
 
 		var fetchDataReply FetchDataForReducerReply
@@ -223,14 +233,15 @@ func (wi *WorkerInstance) fetchReduceData(task *ReduceTask) []KeyValue {
 			ExpectedWorkerId: source.WorkerId,
 		}, &fetchDataReply)
 		if err != nil {
-			wi.reportFailedReduce(task.ReducerId)
-			return nil
+			log.Printf("Failed to fetch data for reducer %d from worker %d: %v", task.ReducerId, source.WorkerId, err)
+			failedWorkerIds = append(failedWorkerIds, source.WorkerId)
+			continue
 		}
 
 		data = append(data, fetchDataReply.KeyValues...)
 	}
 
-	return data
+	return data, failedWorkerIds
 }
 
 // executeReduce applies the reduce function to grouped key-value pairs.
@@ -259,16 +270,22 @@ func (wi *WorkerInstance) executeReduce(data []KeyValue) []KeyValue {
 }
 
 // reportFailedReduce notifies the coordinator that a reduce task failed.
-func (wi *WorkerInstance) reportFailedReduce(reducerId uint32) {
+func (wi *WorkerInstance) reportFailedReduce(reducerId uint32, failedWorkerIds []uint32) {
 	var reportReduceTaskReply ReportReduceTaskReply
 	err := wi.Coordinator.ReportReduceTask(ReportReduceTaskArgs{
-		Id:        reducerId,
-		WorkerId:  wi.WorkerId,
-		Success:   false,
-		KeyValues: nil,
+		Id:              reducerId,
+		WorkerId:        wi.WorkerId,
+		Success:         false,
+		KeyValues:       nil,
+		FailedWorkerIds: failedWorkerIds,
 	}, &reportReduceTaskReply)
 	if err != nil {
 		log.Fatalf("Failed to report failed reduce task: %v", err)
+	}
+	if len(failedWorkerIds) > 0 {
+		log.Printf("Worker %d reported failure for reduce task %d (failed workers: %v)", wi.WorkerId, reducerId, failedWorkerIds)
+	} else {
+		log.Printf("Worker %d reported failure for reduce task %d", wi.WorkerId, reducerId)
 	}
 }
 
@@ -399,7 +416,11 @@ func startWorkerRpcServer() (*WorkerRpc, error) {
 			}
 
 			rpcServer := rpc.NewServer()
-			rpcServer.Register(workerRpc)
+			err = rpcServer.Register(workerRpc)
+			if err != nil {
+				log.Fatalf("WorkerRpc Register err: %v", err)
+				return
+			}
 			go rpcServer.ServeConn(conn)
 		}
 	}()
@@ -422,7 +443,7 @@ func (c *WorkerRpc) FetchDataForReducer(args FetchDataForReducerArgs, reply *Fet
 }
 
 // PingWorker responds to health check pings from the coordinator.
-func (c *WorkerRpc) PingWorker(args PingWorkerArgs, reply *PingWorkerReply) error {
+func (c *WorkerRpc) PingWorker(_ PingWorkerArgs, reply *PingWorkerReply) error {
 	reply.WorkerId = c.localWorkerId
 	return nil
 }

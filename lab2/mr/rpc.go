@@ -61,10 +61,11 @@ type GetWorkTaskReply struct {
 
 // ReportReduceTaskArgs contains the arguments for reporting a reduce task result.
 type ReportReduceTaskArgs struct {
-	WorkerId  uint32
-	Id        uint32
-	Success   bool
-	KeyValues []KeyValue
+	WorkerId        uint32
+	Id              uint32
+	Success         bool
+	KeyValues       []KeyValue
+	FailedWorkerIds []uint32 // Worker IDs from which data could not be fetched
 }
 
 // ReportReduceTaskReply is the response to a reduce task report (currently empty).
