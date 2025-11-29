@@ -101,18 +101,17 @@ func Worker(mapf func(string, string) []KeyValue,
 		}
 		switch reply.Type {
 		case ExitTask:
-			println("Exiting task")
+			println("Worker exiting")
 			return
 		case TaskWait:
-			fmt.Printf("Waiting for %d seconds\n", reply.WaitTask.SleepTime/time.Second)
 			time.Sleep(reply.WaitTask.SleepTime)
 			break
 		case TaskMap:
-			fmt.Printf("Processing map task %d\n", reply.MapTask.TaskId)
+			log.Printf("Processing map task %d\n", reply.MapTask.TaskId)
 			instance.ProcessMapTask(reply.MapTask)
 			break
 		case TaskReduce:
-			fmt.Printf("Processing reduce task %d\n", reply.ReduceTask.ReducerId)
+			log.Printf("Processing reduce task %d\n", reply.ReduceTask.ReducerId)
 			instance.ProcessReduceTask(reply.ReduceTask)
 			break
 		default:
@@ -166,30 +165,30 @@ func (wi *WorkerInstance) saveMapResult(mapRes []KeyValue) {
 func (wi *WorkerInstance) ProcessReduceTask(task *ReduceTask) {
 
 	println("Reducer", task.ReducerId, "fetching data from other workers")
-	otherWorkerRpcs := make([]OtherWorkerRpc, 0)
-
-	for _, addr := range task.DataSources {
-		otherWorkerRpc, err := ConnectToOtherWorker(addr)
-		if err != nil {
-			log.Printf("Failed to connect to other worker at %s: %v", addr, err)
-			wi.ReportFailedReduce(task.ReducerId)
-			return
-		}
-		otherWorkerRpcs = append(otherWorkerRpcs, otherWorkerRpc)
-	}
 
 	data := make([]KeyValue, 0)
 
-	for _, otherWorkerRpc := range otherWorkerRpcs {
-		var fetchDataReply FetchDataForReducerReply
-		err := otherWorkerRpc.FetchDataForReducer(FetchDataForReducerArgs{
-			ReducerId: task.ReducerId,
+	for _, source := range task.DataSources {
+		otherWorkerRpc, err := ConnectToOtherWorker(source.Endpoint)
+		if err != nil {
+			log.Printf("Failed to connect to other worker at %s: %v", source.Endpoint, err)
+			wi.ReportFailedReduce(task.ReducerId)
+			return
+		}
+
+		var fetchDataReply = FetchDataForReducerReply{}
+		err = otherWorkerRpc.FetchDataForReducer(FetchDataForReducerArgs{
+			ReducerId:        task.ReducerId,
+			ExpectedWorkerId: source.WorkerId,
 		}, &fetchDataReply)
 		if err != nil {
 			log.Printf("Failed to fetch data for reducer from other worker: %v", err)
 			wi.ReportFailedReduce(task.ReducerId)
 			return
 		}
+
+		log.Printf("Successfully fetched data for reducer %d: %d key-values", task.ReducerId, len(fetchDataReply.KeyValues))
+
 		data = append(data, fetchDataReply.KeyValues...)
 	}
 
@@ -202,7 +201,12 @@ func (wi *WorkerInstance) ProcessReduceTask(task *ReduceTask) {
 	}
 
 	data = append(data, localData...)
-	println("Total key-values to reduce:", len(data))
+	log.Printf("Total key-values %d to reduce in reducer nr %d", len(data), task.ReducerId)
+	if len(data) == 0 && (task.ReducerId == 9 || task.ReducerId == 5 || task.ReducerId == 2 || task.ReducerId == 0) {
+		log.Printf("Reduce task data retreve finished with no data")
+		log.Printf("Tried to fetch from %d other workers", len(task.DataSources))
+		time.Sleep(10 * time.Second)
+	}
 	sort.Sort(ByKey(data))
 
 	reducedData := make([]KeyValue, 0)
@@ -354,7 +358,6 @@ func StartWorkerRpcServer() (*WorkerRpc, error) {
 
 	l, err := net.Listen("tcp", ":"+PREFFERED_DEFAULT_PORT)
 	if err != nil {
-		fmt.Println("Failed to start WorkerRpc server on preferred port, trying random port:", err)
 		l, err = net.Listen("tcp", ":0")
 		if err != nil {
 			return nil, fmt.Errorf("WorkerRpc net.Listen err: %v", err)
@@ -381,11 +384,19 @@ func StartWorkerRpcServer() (*WorkerRpc, error) {
 }
 
 func (c *WorkerRpc) FetchDataForReducer(args FetchDataForReducerArgs, reply *FetchDataForReducerReply) error {
+	if args.ExpectedWorkerId != c.localWorkerId {
+		err := fmt.Sprintf("Worker %d received FetchDataForReducer request intended for worker %d", c.localWorkerId, args.ExpectedWorkerId)
+		log.Printf(err)
+		return fmt.Errorf(err)
+	}
+
 	kvs, err := readMapResultForReducer(c.localWorkerId, args.ReducerId)
 	if err != nil {
 		return err
 	}
 	reply.KeyValues = kvs
+
+	log.Printf("Worker %d serving %d key-values for reducer %d", c.localWorkerId, len(kvs), args.ReducerId)
 
 	return nil
 }
@@ -399,7 +410,6 @@ func readMapResultForReducer(workerId uint32, reducerId uint32) ([]KeyValue, err
 	fileName := fmt.Sprintf("worker-%d-map-result-for-reducer-%d.tmp", workerId, reducerId)
 
 	if _, err := os.Stat(fileName); os.IsNotExist(err) {
-		println("Map result file does not exist:", fileName)
 		return []KeyValue{}, nil
 	}
 

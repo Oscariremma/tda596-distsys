@@ -27,9 +27,14 @@ type MapTask struct {
 	Content  string
 }
 
+type DataSource struct {
+	WorkerId uint32
+	Endpoint string
+}
+
 type ReduceTask struct {
 	ReducerId   uint32
-	DataSources []string
+	DataSources []DataSource
 }
 
 type WaitTask struct {
@@ -77,7 +82,8 @@ type RegisterWorkerReply struct {
 // Worker-worker RCP definitions.
 
 type FetchDataForReducerArgs struct {
-	ReducerId uint32
+	ReducerId        uint32
+	ExpectedWorkerId uint32
 }
 
 type FetchDataForReducerReply struct {

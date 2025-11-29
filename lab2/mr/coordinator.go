@@ -10,19 +10,20 @@ import (
 import "net"
 import "os"
 import "net/rpc"
-import "sync/atomic"
 
 const TASK_TIMEOUT = 10 * time.Second
 
 type MapTaskStatus struct {
 	taskId    uint32
-	completed atomic.Bool
-	workerId  atomic.Pointer[uint32]
+	completed bool
+	workerId  uint32
+	assigned  bool
 }
 
 type ReduceTaskStatus struct {
-	completed atomic.Bool
-	workerId  atomic.Pointer[uint32]
+	completed bool
+	workerId  uint32
+	assigned  bool
 }
 
 type RemoteWorker struct {
@@ -31,35 +32,43 @@ type RemoteWorker struct {
 }
 
 type Coordinator struct {
-	currentWorkerId atomic.Uint32
-	workers         sync.Map
+	coordinatorMutex sync.Mutex
+
+	currentWorkerId uint32
+	workers         map[uint32]*RemoteWorker
 
 	inputFiles           []string
 	nReduce              uint32
 	mapTasks             map[uint32]*MapTaskStatus
-	completedMapTasks    atomic.Uint32
+	completedMapTasks    uint32
 	reduceTasks          map[uint32]*ReduceTaskStatus
-	completedReduceTasks atomic.Uint32
+	completedReduceTasks uint32
 
 	availableMapTasks    chan uint32
 	availableReduceTasks chan uint32
 
-	mapTimeoutCancel    sync.Map
-	reduceTimeoutCancel sync.Map
+	mapTimeoutCancel    map[uint32]chan struct{}
+	reduceTimeoutCancel map[uint32]chan struct{}
 
-	newWorkers sync.Map
+	newWorkers map[uint32]struct{}
 
 	workDone atomic.Bool
 }
 
 func (c *ConnCoordinator) RegisterWorker(args RegisterWorkerArgs, reply *RegisterWorkerReply) error {
 
-	var workerId = c.coordinator.currentWorkerId.Add(1) - 1
-	c.coordinator.workers.Store(workerId, &RemoteWorker{
+	c.coordinator.coordinatorMutex.Lock()
+	defer c.coordinator.coordinatorMutex.Unlock()
+
+	var workerId = c.coordinator.currentWorkerId
+	c.coordinator.currentWorkerId++
+
+	c.coordinator.workers[workerId] = &RemoteWorker{
 		id:          workerId,
 		rpcEndpoint: hostFromConn(c) + ":" + args.LocalRpcPort,
-	})
-	c.coordinator.newWorkers.Store(workerId, struct{}{})
+	}
+
+	c.coordinator.newWorkers[workerId] = struct{}{}
 
 	reply.WorkerId = workerId
 	reply.ReducerCount = c.coordinator.nReduce
@@ -68,14 +77,17 @@ func (c *ConnCoordinator) RegisterWorker(args RegisterWorkerArgs, reply *Registe
 }
 
 func (c *ConnCoordinator) GetWorkTask(args *GetWorkTaskArgs, reply *GetWorkTaskReply) error {
-	if _, workerExists := c.coordinator.workers.Load(args.WorkerId); !workerExists {
+	c.coordinator.coordinatorMutex.Lock()
+	defer c.coordinator.coordinatorMutex.Unlock()
+
+	if c.coordinator.workers[args.WorkerId] == nil {
 		println("Unregistered worker", args.WorkerId, "requested work; telling it to exit")
 		reply.Type = ExitTask
 		return nil
 	}
 
 	println("Worker", args.WorkerId, "requested work")
-	if c.coordinator.currentWorkerId.Load() < 1 {
+	if c.coordinator.currentWorkerId < 1 {
 		reply.Type = TaskWait
 		reply.WaitTask = &WaitTask{
 			SleepTime: 1 * time.Second,
@@ -84,12 +96,9 @@ func (c *ConnCoordinator) GetWorkTask(args *GetWorkTaskArgs, reply *GetWorkTaskR
 		return nil
 	}
 
-	if _, thisWorkerIsNew := c.coordinator.newWorkers.Load(args.WorkerId); !thisWorkerIsNew {
-		var newWorkersAvailable = false
-		c.coordinator.newWorkers.Range(func(key, value any) bool {
-			newWorkersAvailable = true
-			return false
-		})
+	_, thisWorkerIsNew := c.coordinator.newWorkers[args.WorkerId]
+	if !thisWorkerIsNew {
+		var newWorkersAvailable = len(c.coordinator.newWorkers) > 0
 		if newWorkersAvailable {
 			reply.Type = TaskWait
 			reply.WaitTask = &WaitTask{
@@ -104,7 +113,8 @@ func (c *ConnCoordinator) GetWorkTask(args *GetWorkTaskArgs, reply *GetWorkTaskR
 	case id := <-c.coordinator.availableMapTasks:
 		task := c.coordinator.mapTasks[id]
 
-		task.workerId.Store(&args.WorkerId)
+		task.workerId = args.WorkerId
+		task.assigned = true
 
 		reply.Type = TaskMap
 
@@ -132,7 +142,7 @@ func (c *ConnCoordinator) GetWorkTask(args *GetWorkTaskArgs, reply *GetWorkTaskR
 		break
 	}
 
-	if c.coordinator.completedMapTasks.Load() != uint32(len(c.coordinator.mapTasks)) {
+	if c.coordinator.completedMapTasks != uint32(len(c.coordinator.mapTasks)) {
 		reply.Type = TaskWait
 		reply.WaitTask = &WaitTask{
 			SleepTime: 1 * time.Second,
@@ -145,38 +155,35 @@ func (c *ConnCoordinator) GetWorkTask(args *GetWorkTaskArgs, reply *GetWorkTaskR
 	case id := <-c.coordinator.availableReduceTasks:
 		task := c.coordinator.reduceTasks[id]
 
-		task.workerId.Store(&args.WorkerId)
+		task.workerId = args.WorkerId
+		task.assigned = true
 
 		reply.Type = TaskReduce
 
-		var dataSources []string
-		c.coordinator.workers.Range(func(key, value any) bool {
-			worker := value.(*RemoteWorker)
-			if key.(uint32) == args.WorkerId {
-				return true
+		var dataSources []DataSource
+		for workerId, worker := range c.coordinator.workers {
+			if workerId == args.WorkerId {
+				continue
 			}
-			if _, ok := c.coordinator.newWorkers.Load(key.(uint32)); ok {
-				return true
+			if _, ok := c.coordinator.newWorkers[workerId]; ok {
+				if id == 0 || id == 2 || id == 5 || id == 9 {
+					log.Printf("Excluding data source from new worker %d for reduce task %d which will run on worker %d", workerId, id, args.WorkerId)
+				}
+				continue
 			}
 
-			dataSources = append(dataSources, worker.rpcEndpoint)
-			return true
-		})
-
-		// Ensure no crashes causing map tasks to be "undone" at this point which could cause missing data
-		if c.coordinator.completedMapTasks.Load() != uint32(len(c.coordinator.mapTasks)) {
-
-			// Re-queue reduce task
-			println("Map tasks incomplete after assigning reduce task; re-queuing reduce task", id)
-			task.workerId.Store(nil)
-			c.coordinator.availableReduceTasks <- id
-
-			reply.Type = TaskWait
-			reply.WaitTask = &WaitTask{
-				SleepTime: 1 * time.Millisecond,
+			if id == 0 || id == 2 || id == 5 || id == 9 {
+				log.Printf("Including data source from worker %d for reduce task %d which will run on worker %d", workerId, id, args.WorkerId)
 			}
-			println("Worker", args.WorkerId, "waiting for map tasks to complete")
-			return nil
+
+			dataSources = append(dataSources, DataSource{
+				WorkerId: workerId,
+				Endpoint: worker.rpcEndpoint,
+			})
+		}
+
+		if len(dataSources) == 0 && len(c.coordinator.newWorkers) != (len(c.coordinator.workers)-1) {
+			log.Fatalf("No data sources available for reduce task %d assigned to worker %d", id, args.WorkerId)
 		}
 
 		reply.ReduceTask = &ReduceTask{
@@ -208,31 +215,36 @@ func (c *ConnCoordinator) GetWorkTask(args *GetWorkTaskArgs, reply *GetWorkTaskR
 
 func (c *ConnCoordinator) ReportMapTask(args *ReportMapTaskArgs, reply *ReportMapTaskReply) error {
 
+	c.coordinator.coordinatorMutex.Lock()
+	defer c.coordinator.coordinatorMutex.Unlock()
+
 	task := c.coordinator.mapTasks[args.TaskId]
-	taskWorkerId := task.workerId.Load()
-	if taskWorkerId == nil || *taskWorkerId != args.WorkerId {
+	if !task.assigned || task.workerId != args.WorkerId {
 		println("Worker", args.WorkerId, "attempted to report map task", args.TaskId, "which is not assigned to it; ignoring report")
 		return nil
 	}
 
 	c.coordinator.cancelMapTimeout(args.TaskId)
 
-	if !task.completed.CompareAndSwap(false, true) {
+	if task.completed {
 		// Task was already marked completed
 		println("Map task", args.TaskId, "was already reported completed; ignoring duplicate report")
 		return nil
 	}
-	c.coordinator.completedMapTasks.Add(1)
-	c.coordinator.newWorkers.Delete(args.WorkerId)
+	task.completed = true
+	c.coordinator.completedMapTasks++
+	delete(c.coordinator.newWorkers, args.WorkerId)
 	println("Map task", args.TaskId, "reported completed")
 	return nil
 }
 
 func (c *ConnCoordinator) ReportReduceTask(args *ReportReduceTaskArgs, reply *ReportReduceTaskReply) error {
+	c.coordinator.coordinatorMutex.Lock()
+	defer c.coordinator.coordinatorMutex.Unlock()
+
 	task := c.coordinator.reduceTasks[args.Id]
 
-	taskWorkerId := task.workerId.Load()
-	if taskWorkerId == nil || *taskWorkerId != args.WorkerId {
+	if !task.assigned || task.workerId != args.WorkerId {
 		println("Worker", args.WorkerId, "attempted to report reduce task", args.Id, "which is not assigned to it; ignoring report")
 		return nil
 	}
@@ -242,19 +254,21 @@ func (c *ConnCoordinator) ReportReduceTask(args *ReportReduceTaskArgs, reply *Re
 	if args.Success == false {
 		// Mark task as not completed and re-queue
 		println("Reduce task", args.Id, "reported failed; re-queuing")
-		task.workerId.Store(nil)
-		task.completed.Store(false)
+		task.workerId = 0
+		task.assigned = false
+		task.completed = false
 		c.coordinator.availableReduceTasks <- args.Id
 		return nil
 	}
 
-	if !task.completed.CompareAndSwap(false, true) {
+	if task.completed {
 		// Task was already marked completed
 		println("Reduce task", args.Id, "was already reported completed; ignoring duplicate report")
 		return nil
 	}
 
-	c.coordinator.completedReduceTasks.Add(1)
+	task.completed = true
+	c.coordinator.completedReduceTasks++
 	println("Reduce task", args.Id, "reported completed")
 
 	outFile, err := os.OpenFile("mr-out-0", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
@@ -271,7 +285,7 @@ func (c *ConnCoordinator) ReportReduceTask(args *ReportReduceTaskArgs, reply *Re
 		}
 	}
 
-	if c.coordinator.completedReduceTasks.Load() == c.coordinator.nReduce {
+	if c.coordinator.completedReduceTasks == c.coordinator.nReduce {
 		println("All reduce tasks completed; marking work done")
 		c.coordinator.workDone.Store(true)
 	}
@@ -282,19 +296,22 @@ func (c *ConnCoordinator) ReportReduceTask(args *ReportReduceTaskArgs, reply *Re
 
 func (c *Coordinator) startMapTimeout(taskId uint32, duration time.Duration) {
 	cancel := make(chan struct{})
-	c.mapTimeoutCancel.Store(taskId, cancel)
+	c.mapTimeoutCancel[taskId] = cancel
 
 	go func() {
 		select {
 		case <-time.After(duration):
+			c.coordinatorMutex.Lock()
 			task := c.mapTasks[taskId]
 			// Atomically clear workerId if task not completed
-			if !task.completed.Load() {
+			if !task.completed {
 				println("Map task", taskId, "timed out; re-queuing")
-				task.workerId.Store(nil)
+				task.workerId = 0
+				task.assigned = false
 				c.availableMapTasks <- taskId
 			}
-			c.mapTimeoutCancel.Delete(taskId)
+			delete(c.mapTimeoutCancel, taskId)
+			c.coordinatorMutex.Unlock()
 		case <-cancel:
 			return
 		}
@@ -302,25 +319,30 @@ func (c *Coordinator) startMapTimeout(taskId uint32, duration time.Duration) {
 }
 
 func (c *Coordinator) cancelMapTimeout(taskId uint32) {
-	if val, ok := c.mapTimeoutCancel.LoadAndDelete(taskId); ok {
-		close(val.(chan struct{}))
+	// Note: caller should hold coordinatorMutex
+	if cancel, ok := c.mapTimeoutCancel[taskId]; ok {
+		delete(c.mapTimeoutCancel, taskId)
+		close(cancel)
 	}
 }
 
 func (c *Coordinator) startReduceTimeout(taskId uint32, duration time.Duration) {
 	cancel := make(chan struct{})
-	c.reduceTimeoutCancel.Store(taskId, cancel)
+	c.reduceTimeoutCancel[taskId] = cancel
 
 	go func() {
 		select {
 		case <-time.After(duration):
+			c.coordinatorMutex.Lock()
 			task := c.reduceTasks[taskId]
-			if !task.completed.Load() {
+			if !task.completed {
 				println("Reduce task", taskId, "timed out; re-queuing")
-				task.workerId.Store(nil)
+				task.workerId = 0
+				task.assigned = false
 				c.availableReduceTasks <- taskId
 			}
-			c.reduceTimeoutCancel.Delete(taskId)
+			delete(c.reduceTimeoutCancel, taskId)
+			c.coordinatorMutex.Unlock()
 		case <-cancel:
 			return
 		}
@@ -328,8 +350,10 @@ func (c *Coordinator) startReduceTimeout(taskId uint32, duration time.Duration) 
 }
 
 func (c *Coordinator) cancelReduceTimeout(taskId uint32) {
-	if val, ok := c.reduceTimeoutCancel.LoadAndDelete(taskId); ok {
-		close(val.(chan struct{}))
+	// Note: caller should hold coordinatorMutex
+	if cancel, ok := c.reduceTimeoutCancel[taskId]; ok {
+		delete(c.reduceTimeoutCancel, taskId)
+		close(cancel)
 	}
 }
 
@@ -399,11 +423,13 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		reduceTasks:          make(map[uint32]*ReduceTaskStatus),
 		availableMapTasks:    make(chan uint32, len(files)),
 		availableReduceTasks: make(chan uint32, nReduce),
-		workers:              sync.Map{},
-		completedMapTasks:    atomic.Uint32{},
-		completedReduceTasks: atomic.Uint32{},
-		currentWorkerId:      atomic.Uint32{},
-		newWorkers:           sync.Map{},
+		workers:              make(map[uint32]*RemoteWorker),
+		completedMapTasks:    0,
+		completedReduceTasks: 0,
+		currentWorkerId:      0,
+		newWorkers:           make(map[uint32]struct{}),
+		mapTimeoutCancel:     make(map[uint32]chan struct{}),
+		reduceTimeoutCancel:  make(map[uint32]chan struct{}),
 	}
 
 	for i := range files {
@@ -446,33 +472,39 @@ func (c *Coordinator) workerHealthCheck() {
 
 	for {
 		<-ticker.C
-		if c.workDone.Load() {
-			// No need to check workers if work is done
-			break
-		}
-		c.workers.Range(func(key, value any) bool {
-			worker := value.(*RemoteWorker)
-			remoteId, err := worker.PingWorker()
-			if c.workDone.Load() {
-				// No need to check workers if work is done
-				return false
-			}
-			if err != nil {
-				println("Worker", worker.id, "is unresponsive; removing from worker list")
-				c.handleDeadWorker(worker.id)
-			}
-
-			if worker.id != remoteId {
-				println("Worker ID mismatch for worker at", worker.rpcEndpoint, "; Presuming old worker gone; removing from worker list")
-				c.handleDeadWorker(worker.id)
-			}
-			return true
-		})
 
 		if c.workDone.Load() {
 			// No need to check workers if work is done
 			break
 		}
+
+		c.coordinatorMutex.Lock()
+		for _, worker := range c.workers {
+			go c.healthCheckSingleWorker(worker)
+		}
+		c.coordinatorMutex.Unlock()
+
+		if c.workDone.Load() {
+			// No need to check workers if work is done
+			break
+		}
+	}
+}
+
+func (c *Coordinator) healthCheckSingleWorker(worker *RemoteWorker) {
+	remoteId, err := worker.PingWorker()
+	if c.workDone.Load() {
+		// No need to anything if work is done
+		return
+	}
+	if err != nil {
+		println("Worker", worker.id, "is unresponsive; removing from worker list")
+		c.handleDeadWorker(worker.id)
+	}
+
+	if worker.id != remoteId {
+		println("Worker ID mismatch for worker at", worker.rpcEndpoint, "; Presuming old worker gone; removing from worker list")
+		c.handleDeadWorker(worker.id)
 	}
 }
 
