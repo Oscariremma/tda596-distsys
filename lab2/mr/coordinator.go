@@ -112,7 +112,7 @@ func (c *ConnCoordinator) RegisterWorker(args RegisterWorkerArgs, reply *Registe
 	reply.WorkerId = workerId
 	reply.ReducerCount = c.coordinator.nReduce
 
-	c.coordinator.logProgress(fmt.Sprintf("Worker %d registered", workerId))
+	c.coordinator.logProgress(fmt.Sprintf("Worker %d registered with endpoint %s", workerId, c.coordinator.workers[workerId].rpcEndpoint))
 	return nil
 }
 
