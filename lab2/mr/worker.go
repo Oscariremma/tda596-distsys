@@ -119,7 +119,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		var reply GetWorkTaskReply
 		err = instance.Coordinator.GetWorkTask(&reply, instance.WorkerId)
 		if err != nil {
-			log.Fatalf("Failed to get work task: %v", err)
+			log.Fatalf("Failed to get work task: %v, assuming coordinator failure and exiting", err)
 		}
 		switch reply.Type {
 		case ExitTask:
