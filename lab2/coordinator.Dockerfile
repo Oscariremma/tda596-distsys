@@ -16,4 +16,6 @@ COPY --from=builder /src/main/pg-*.txt /input
 # Expose the port your proxy listens on (adjust if different)
 EXPOSE 1234
 
+WORKDIR /output
+
 ENTRYPOINT ["/coordinator", "/input/pg-*.txt"]

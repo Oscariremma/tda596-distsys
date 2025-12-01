@@ -1,6 +1,7 @@
 # Build stage
-FROM golang:1.25 AS builder
+FROM golang:1.25-alpine AS builder
 WORKDIR /src
+RUN apk add --no-cache gcc musl-dev
 
 COPY . .
 
@@ -22,13 +23,15 @@ RUN go build -buildmode=plugin -o /bin/crash.so mrapps/crash.go
 RUN go build -buildmode=plugin -o /bin/nocrash.so mrapps/nocrash.go
 RUN go build -o /bin/worker main/mrworker.go
 
-# Production stage: minimal image using scratch
-FROM scratch
+# runtime image must provide libc / dynamic loader
+FROM alpine:3.22.2
 # Copy the compiled binaries into the final image
 COPY --from=builder /bin/worker /worker
 COPY --from=builder /bin/*.so /plugins/
 
 # Expose the port your proxy listens on (adjust if different)
 EXPOSE 1235
+
+WORKDIR /workdir
 
 ENTRYPOINT ["/worker", "/plugins/wc.so"]
