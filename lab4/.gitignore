@@ -1,0 +1,7 @@
+*.tmp
+main/mr-tmp
+main/mrcoordinator
+main/mrworker
+main/mrsequential
+main/mrworker-race
+*mr-out-*
