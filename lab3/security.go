@@ -18,10 +18,6 @@ import (
 	"time"
 )
 
-// Replication factor for fault tolerance
-const ReplicationFactor = 3
-
-// SecurityConfig holds security-related configuration
 type SecurityConfig struct {
 	EnableTLS   bool
 	TLSConfig   *tls.Config
@@ -29,7 +25,6 @@ type SecurityConfig struct {
 	CertPool    *x509.CertPool
 }
 
-// Global security configuration
 var securityConfig = &SecurityConfig{
 	EnableTLS: false,
 }

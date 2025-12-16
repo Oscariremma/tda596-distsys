@@ -2,8 +2,6 @@ package main
 
 import "math/big"
 
-// RPC Request/Response Types for Chord protocol
-
 // FindSuccessorArgs is the argument for FindSuccessor RPC
 type FindSuccessorArgs struct {
 	ID *big.Int
@@ -52,7 +50,7 @@ type StoreFileArgs struct {
 	Filename  string
 	Content   []byte
 	Encrypted bool
-	IsReplica bool // Indicates if this is a replication request
+	IsReplica bool // Is a replication request
 }
 
 // StoreFileReply is the reply for StoreFile RPC
@@ -76,7 +74,7 @@ type GetFileReply struct {
 // DeleteFileArgs is the argument for DeleteFile RPC
 type DeleteFileArgs struct {
 	Key       *big.Int
-	IsReplica bool // Indicates if this is a replica deletion (don't cascade)
+	IsReplica bool // Is a replica deletion (don't cascade)
 }
 
 // DeleteFileReply is the reply for DeleteFile RPC
@@ -92,7 +90,7 @@ type TransferKeysArgs struct {
 // TransferKeysReply is the reply for TransferKeys RPC
 type TransferKeysReply struct {
 	Keys  []*big.Int
-	Files map[string]*FileData // keyed by hex string for serialization
+	Files map[string]*FileData
 }
 
 // ReplicateArgs is the argument for Replicate RPC

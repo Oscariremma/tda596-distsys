@@ -6,6 +6,9 @@ import (
 	"math/big"
 )
 
+// Replication factor for fault tolerance
+const ReplicationFactor = 3
+
 // Create initializes a new Chord ring
 func (n *Node) Create() {
 	n.mu.Lock()
@@ -48,7 +51,6 @@ func (n *Node) Join(existingAddr string) error {
 		}
 	}
 
-	// Request key transfer from successor
 	go n.requestKeyTransfer(successor)
 
 	return nil

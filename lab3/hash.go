@@ -7,16 +7,15 @@ import (
 	"math/big"
 )
 
-// Constants for Chord protocol
 const (
 	KeySize    = sha1.Size * 8 // 160 bits for SHA1
 	MaxSteps   = 32            // Maximum number of hops for lookup
-	FingerSize = 160           // Size of finger table (0-indexed: 0 to 159)
+	FingerSize = 160           // Size of finger table
 )
 
 var (
 	two     = big.NewInt(2)
-	hashMod = new(big.Int).Exp(big.NewInt(2), big.NewInt(KeySize), nil)
+	hashMod = new(big.Int).Exp(two, big.NewInt(KeySize), nil)
 )
 
 // hashString computes the SHA1 hash of a string and returns it as a big.Int
@@ -24,13 +23,6 @@ func hashString(s string) *big.Int {
 	hasher := sha1.New()
 	hasher.Write([]byte(s))
 	return new(big.Int).SetBytes(hasher.Sum(nil))
-}
-
-// hashToHex converts a string to its SHA1 hash in hex format
-func hashToHex(s string) string {
-	hasher := sha1.New()
-	hasher.Write([]byte(s))
-	return hex.EncodeToString(hasher.Sum(nil))
 }
 
 // hexToInt converts a hex string to a big.Int
@@ -45,7 +37,7 @@ func intToHex(i *big.Int) string {
 }
 
 // between checks if elt is in (start, end] (if inclusive) or (start, end) (if not inclusive)
-// This handles the circular nature of the Chord ring
+// Handles the circular nature of the Chord ring
 func between(start, elt, end *big.Int, inclusive bool) bool {
 	if end.Cmp(start) > 0 {
 		// Normal case: start < end

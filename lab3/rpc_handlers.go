@@ -26,10 +26,11 @@ func (n *Node) Notify(args *NotifyArgs, reply *NotifyReply) error {
 
 	if n.Predecessor == nil {
 		n.Predecessor = &args.Node
-	} else {
-		if between(n.Predecessor.ID, args.Node.ID, n.Info.ID, false) {
-			n.Predecessor = &args.Node
-		}
+		return nil
+	}
+
+	if between(n.Predecessor.ID, args.Node.ID, n.Info.ID, false) {
+		n.Predecessor = &args.Node
 	}
 	return nil
 }
@@ -157,7 +158,6 @@ func (n *Node) DeleteFile(args *DeleteFileArgs, reply *DeleteFileReply) error {
 	reply.Success = true
 	log.Printf("Deleted file with key %s", keyHex[:16]+"...")
 
-	// Delete from replicas if this is not already a replica deletion request
 	if !args.IsReplica {
 		go func() {
 			deleted := 0
@@ -169,7 +169,7 @@ func (n *Node) DeleteFile(args *DeleteFileArgs, reply *DeleteFileReply) error {
 					continue
 				}
 				seen[successors[i].Address] = true
-				// Tell replica to delete (mark as replica so it doesn't cascade)
+				// Tell replica to delete
 				RemoteDeleteFileReplica(successors[i].Address, args.Key)
 				deleted++
 			}
@@ -190,7 +190,6 @@ func (n *Node) TransferKeys(args *TransferKeysArgs, reply *TransferKeysReply) er
 	for keyHex, content := range n.Bucket {
 		keyInt := hexToInt(keyHex)
 
-		// If key should belong to the new node
 		if n.Predecessor != nil {
 			if between(n.Predecessor.ID, keyInt, args.NewNode.ID, true) {
 				reply.Keys = append(reply.Keys, keyInt)

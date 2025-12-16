@@ -32,15 +32,15 @@ type Node struct {
 	mu          sync.RWMutex
 	Info        NodeInfo
 	Predecessor *NodeInfo
-	Successors  []*NodeInfo          // Successor list
-	FingerTable []*NodeInfo          // Finger table
+	Successors  []*NodeInfo
+	FingerTable []*NodeInfo
 	Bucket      map[string]*FileData // Key as hex string
 	R           int                  // Number of successors to maintain
 	NextFinger  int                  // Next finger to fix
 	listener    net.Listener         // Network listener
 }
 
-// NewNode creates a new Chord node with the given configuration
+// NewNode creates a new Chord node
 func NewNode(cfg *Config) *Node {
 	nodeID := hashString(cfg.NodeAddr)
 	if cfg.CustomID != "" {

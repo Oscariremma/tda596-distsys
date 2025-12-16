@@ -82,7 +82,6 @@ func (c *CLI) handleLookup(parts []string) {
 	filename := parts[1]
 	key := hashString(filename)
 
-	// Use fault-tolerant file retrieval
 	reply, sourceNode, isReplica, err := GetFileWithFaultTolerance(c.node, key)
 	if err != nil {
 		fmt.Printf("Error during lookup: %v\n", err)
@@ -101,7 +100,7 @@ func (c *CLI) handleLookup(parts []string) {
 
 		content := reply.Content
 
-		// Decrypt if file is encrypted (per-file encryption)
+		// Decrypt if file is encrypted
 		if reply.Encrypted {
 			fmt.Print("File is encrypted. Enter decryption password: ")
 			password, err := term.ReadPassword(int(syscall.Stdin))
@@ -133,20 +132,17 @@ func (c *CLI) handleStoreFile(parts []string) {
 	}
 	filepath := parts[1]
 
-	// Read the file
 	content, err := os.ReadFile(filepath)
 	if err != nil {
 		fmt.Printf("Error reading file: %v\n", err)
 		return
 	}
 
-	// Extract filename from path
 	filename := filepath
 	if idx := strings.LastIndex(filepath, "/"); idx != -1 {
 		filename = filepath[idx+1:]
 	}
 
-	// Use the high-level store function with replication (no encryption)
 	key, primary, err := StoreFileWithReplication(c.node, filename, content, false)
 	if err != nil {
 		fmt.Printf("Error storing file: %v\n", err)
@@ -164,20 +160,17 @@ func (c *CLI) handleStoreFileEnc(parts []string) {
 	}
 	filepath := parts[1]
 
-	// Read the file
 	content, err := os.ReadFile(filepath)
 	if err != nil {
 		fmt.Printf("Error reading file: %v\n", err)
 		return
 	}
 
-	// Extract filename from path
 	filename := filepath
 	if idx := strings.LastIndex(filepath, "/"); idx != -1 {
 		filename = filepath[idx+1:]
 	}
 
-	// Prompt for encryption password
 	fmt.Print("Enter encryption password: ")
 	password, err := term.ReadPassword(int(syscall.Stdin))
 	fmt.Println()
@@ -186,7 +179,6 @@ func (c *CLI) handleStoreFileEnc(parts []string) {
 		return
 	}
 
-	// Confirm password
 	fmt.Print("Confirm password: ")
 	password2, err := term.ReadPassword(int(syscall.Stdin))
 	fmt.Println()
@@ -200,7 +192,6 @@ func (c *CLI) handleStoreFileEnc(parts []string) {
 		return
 	}
 
-	// Derive key from password and encrypt
 	fileKey := deriveKey(string(password))
 	encContent, err := encrypt(content, fileKey)
 	if err != nil {
@@ -208,7 +199,6 @@ func (c *CLI) handleStoreFileEnc(parts []string) {
 		return
 	}
 
-	// Use the high-level store function with replication
 	key, primary, err := StoreFileWithReplication(c.node, filename, encContent, true)
 	if err != nil {
 		fmt.Printf("Error storing file: %v\n", err)

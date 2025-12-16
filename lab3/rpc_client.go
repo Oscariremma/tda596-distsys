@@ -158,18 +158,15 @@ func GetFileWithFaultTolerance(n *Node, key *big.Int) (*GetFileReply, NodeInfo, 
 		return nil, NodeInfo{}, false, fmt.Errorf("failed to find successor: %v", err)
 	}
 
-	// Try to get from primary node
 	reply, err := RemoteGetFile(successor.Address, key)
 	if err == nil && reply.Found {
 		return reply, successor, false, nil
 	}
 
-	// If primary failed or didn't have the file, try to find replicas
-	// Get successors of the primary (they should have replicas)
+	// Primary failed or didn't have the file, try to find replicas
 	successors, err := RemoteGetSuccessors(successor.Address)
 	if err != nil {
 		// Primary might be completely dead, find its successors via another route
-		// Use finger table or successor list to find alternative paths
 		n.mu.RLock()
 		for _, s := range n.Successors {
 			if s != nil && s.Address != "" && s.Address != successor.Address {
@@ -216,13 +213,11 @@ func GetFileWithFaultTolerance(n *Node, key *big.Int) (*GetFileReply, NodeInfo, 
 func StoreFileWithReplication(n *Node, filename string, content []byte, encrypted bool) (*big.Int, NodeInfo, error) {
 	key := hashString(filename)
 
-	// Find the primary responsible node
 	successor, err := RemoteFindSuccessor(n, key)
 	if err != nil {
 		return nil, NodeInfo{}, fmt.Errorf("failed to find successor: %v", err)
 	}
 
-	// Store on primary
 	success, err := RemoteStoreFile(successor.Address, key, filename, content, encrypted, false)
 	if err != nil || !success {
 		return nil, NodeInfo{}, fmt.Errorf("failed to store file on primary node: %v", err)
@@ -235,13 +230,12 @@ func StoreFileWithReplication(n *Node, filename string, content []byte, encrypte
 func DeleteFileWithReplication(n *Node, filename string) (NodeInfo, error) {
 	key := hashString(filename)
 
-	// Find the primary responsible node
 	successor, err := RemoteFindSuccessor(n, key)
 	if err != nil {
 		return NodeInfo{}, fmt.Errorf("failed to find successor: %v", err)
 	}
 
-	// Delete from primary - primary will handle replica deletion
+	// Primary will handle replica deletion
 	success, err := RemoteDeleteFile(successor.Address, key)
 	if err != nil || !success {
 		return NodeInfo{}, fmt.Errorf("failed to delete file from primary node: %v", err)

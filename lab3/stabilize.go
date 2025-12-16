@@ -24,7 +24,7 @@ func (n *Node) Stabilize() {
 
 	n.mu.Lock()
 	if pred != nil && n.Successors[0] != nil {
-		// If predecessor of successor is between us and our successor, update
+		// Predecessor of successor is between us and our successor
 		if between(n.Info.ID, pred.ID, n.Successors[0].ID, false) {
 			n.Successors[0] = pred
 		}
@@ -39,10 +39,8 @@ func (n *Node) Stabilize() {
 		return
 	}
 
-	// Notify our successor
 	RemoteNotify(currentSuccessor.Address, n.Info)
 
-	// Update successor list from successor
 	successors, err := RemoteGetSuccessors(currentSuccessor.Address)
 	if err == nil {
 		n.mu.Lock()
@@ -66,11 +64,10 @@ func (n *Node) handleSuccessorFailure() {
 			if n.Successors[0] != nil && n.Successors[i].Address == n.Successors[0].Address {
 				continue
 			}
-			// Check if this successor is alive
+
 			err := RemotePing(n.Successors[i].Address)
 			if err == nil {
 				log.Printf("Successor failed, switching to backup: %s", n.Successors[i].Address)
-				// Move this successor up, set remaining to nil
 				n.Successors[0] = n.Successors[i]
 				for j := 1; j < n.R; j++ {
 					if i+j < n.R {
@@ -85,7 +82,7 @@ func (n *Node) handleSuccessorFailure() {
 	}
 }
 
-// FixFingers updates the finger table (0-indexed)
+// FixFingers updates the finger table
 func (n *Node) FixFingers() {
 	n.mu.Lock()
 	n.NextFinger++
@@ -96,7 +93,6 @@ func (n *Node) FixFingers() {
 	nodeID := n.Info.ID
 	n.mu.Unlock()
 
-	// Calculate the ID for this finger entry: (n + 2^nextFinger) mod 2^m
 	fingerID := jump(nodeID, nextFinger)
 
 	// Find successor for this finger
@@ -149,7 +145,7 @@ func (n *Node) isPrimaryForKey(keyHex string) bool {
 
 	keyInt := hexToInt(keyHex)
 
-	// If we have no predecessor, we're the only node - we're primary for everything
+	// We're the only node, primary for everything
 	if predecessor == nil {
 		return true
 	}
@@ -158,7 +154,7 @@ func (n *Node) isPrimaryForKey(keyHex string) bool {
 	return between(predecessor.ID, keyInt, n.Info.ID, true)
 }
 
-// RepairReplication checks files where we are the PRIMARY and ensures they have enough replicas
+// RepairReplication checks files where we are the primary and ensures they have enough replicas
 func (n *Node) RepairReplication() {
 	n.mu.RLock()
 
@@ -167,7 +163,6 @@ func (n *Node) RepairReplication() {
 		return
 	}
 
-	// Get a snapshot of our files and successors
 	files := make(map[string]*FileData)
 	for k, v := range n.Bucket {
 		files[k] = v
@@ -178,7 +173,6 @@ func (n *Node) RepairReplication() {
 
 	n.mu.RUnlock()
 
-	// Get unique, alive successors
 	aliveSuccessors := make([]*NodeInfo, 0, ReplicationFactor-1)
 	seen := make(map[string]bool)
 	seen[n.Info.Address] = true // Don't include self
@@ -187,7 +181,6 @@ func (n *Node) RepairReplication() {
 		if s == nil || s.Address == "" || seen[s.Address] {
 			continue
 		}
-		// Check if successor is alive
 		err := RemotePing(s.Address)
 		if err == nil {
 			aliveSuccessors = append(aliveSuccessors, s)
@@ -198,9 +191,7 @@ func (n *Node) RepairReplication() {
 		}
 	}
 
-	// For each file, check if we're the primary and if replication is needed
 	for keyHex, data := range files {
-		// Only the primary node should manage replication for a key
 		if !n.isPrimaryForKey(keyHex) {
 			continue
 		}
@@ -222,7 +213,6 @@ func (n *Node) RepairReplication() {
 			}
 		}
 
-		// If under-replicated, replicate to nodes that don't have it
 		needed := ReplicationFactor - 1 - replicaCount
 		if needed > 0 && len(needsReplication) > 0 {
 			log.Printf("File %s is under-replicated (%d/%d), repairing...",
